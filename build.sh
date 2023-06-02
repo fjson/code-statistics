@@ -1,5 +1,6 @@
 #!/bin/bash -e
 cargo build -r
+upx ./target/release/code-statistics.exe
 cross build --target x86_64-unknown-linux-musl --release
 upx ./target/x86_64-unknown-linux-musl/release/code-statistics
 scp ./target/x86_64-unknown-linux-musl/release/code-statistics root@172.21.56.252:~/jenkins/scripts

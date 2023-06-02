@@ -10,14 +10,21 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(author = "jason xing", version, about, long_about = None)]
 pub struct StatisticArgs {
+    /// 开始日期
     #[arg(long, short)]
     start: String,
 
+    /// 结束日期
     #[arg(long, short)]
     end: String,
 
+    /// git 项目地址
     #[arg(long, short)]
     input: String,
+
+    /// 是否根据提交者显示统计结果
+    #[arg(long, short, default_value_t = false)]
+    author: bool,
 }
 
 fn main() {
@@ -54,10 +61,8 @@ fn main() {
                     *num += 1;
                     // println!("process {}/{}", num, total);
                 }
-                if let Some(_) = &v.parent_commit_id {
-                    let diff_res = get_commit_diff_by_git(&dir_arc, v);
-                    statistic.lock().unwrap().add(diff_res);
-                }
+                let diff_res = get_commit_diff_by_git(&dir_arc, v);
+                statistic.lock().unwrap().add(diff_res);
             });
         });
         thread_vec.push(handle);
@@ -65,7 +70,7 @@ fn main() {
     for handle in thread_vec {
         handle.join().unwrap();
     }
-    statistic.lock().unwrap().print();
+    statistic.lock().unwrap().print(args.author);
     let duration = start.elapsed();
     println!("exec time: {:?}ms", duration.as_millis());
 }
@@ -86,22 +91,48 @@ impl Statistic {
         self.statistic_item_vec.push(item);
     }
 
-    fn print(&self) {
-        let mut files = 0;
-        let mut insertion = 0;
-        let mut deletion = 0;
+    fn print(&self, print_with_author: bool) {
+        let mut author_map = std::collections::HashMap::new();
         self.statistic_item_vec.iter().for_each(|v| {
-            files += v.files;
-            insertion += v.insertion;
-            deletion += v.deletion;
+            let author = v.commit.author.clone();
+            author_map.entry(author).or_insert(vec![]).push(v.clone());
         });
-        println!(
-            "commits: {}, files: {}, insertion: {}, deletion: {}",
-            self.statistic_item_vec.len(),
-            files,
-            insertion,
-            deletion
-        );
+
+        let print_statistic = |author: &str, commits: &Vec<StatisticItem>| {
+            let mut files = 0;
+            let mut insertion = 0;
+            let mut deletion = 0;
+            commits.iter().for_each(|v| {
+                files += v.files;
+                insertion += v.insertion;
+                deletion += v.deletion;
+            });
+            // 限制author长度
+            let author = if author.len() > 10 {
+                format!("{}...", &author[0..10])
+            } else {
+                author.to_string()
+            };
+            println!(
+                "{: <13} commits: {: <10} files: {: <10} insertion: {: <10} deletion: {: <10}",
+                author,
+                commits.len(),
+                files,
+                insertion,
+                deletion
+            );
+        };
+
+        // 根据提交者统计
+        if print_with_author {
+            author_map.iter().for_each(|(k, v)| {
+                // println!("{:#?}", v);
+                print_statistic(k, v);
+            });
+        }
+
+        // 统计总数
+        print_statistic("Total", &self.statistic_item_vec);
     }
 }
 
@@ -121,8 +152,8 @@ fn get_commit_diff_by_git(dir: &str, commit: Commit) -> StatisticItem {
         .args(&[
             "diff",
             "--shortstat",
+            commit.parent_commit_id.as_ref().unwrap_or(&"4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()),
             &commit.id,
-            commit.parent_commit_id.as_ref().unwrap(),
         ])
         .output()
         .expect("failed to execute process");
@@ -133,29 +164,27 @@ fn get_commit_diff_by_git(dir: &str, commit: Commit) -> StatisticItem {
     let mut files = 0;
     while let Some(line) = lines.next() {
         let line = line.trim();
-        if line.contains("deletion") {
-            let insertion_res = Regex::new(r"(\d+) insertion").unwrap();
-            let deletion_res = Regex::new(r"(\d+) deletion").unwrap();
-            let files_res = Regex::new(r"(\d+) file").unwrap();
-            if let Some(files_res) = files_res.captures(line) {
-                files = files_res.get(1).unwrap().as_str().parse::<usize>().unwrap();
-            }
-            if let Some(insertion_res) = insertion_res.captures(line) {
-                insertion = insertion_res
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .parse::<usize>()
-                    .unwrap();
-            }
-            if let Some(deletion_res) = deletion_res.captures(line) {
-                deletion = deletion_res
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .parse::<usize>()
-                    .unwrap();
-            }
+        let insertion_res = Regex::new(r"(\d+) insertion").unwrap();
+        let deletion_res = Regex::new(r"(\d+) deletion").unwrap();
+        let files_res = Regex::new(r"(\d+) file").unwrap();
+        if let Some(files_res) = files_res.captures(line) {
+            files = files_res.get(1).unwrap().as_str().parse::<usize>().unwrap();
+        }
+        if let Some(insertion_res) = insertion_res.captures(line) {
+            insertion = insertion_res
+                .get(1)
+                .unwrap()
+                .as_str()
+                .parse::<usize>()
+                .unwrap();
+        }
+        if let Some(deletion_res) = deletion_res.captures(line) {
+            deletion = deletion_res
+                .get(1)
+                .unwrap()
+                .as_str()
+                .parse::<usize>()
+                .unwrap();
         }
     }
     StatisticItem {
