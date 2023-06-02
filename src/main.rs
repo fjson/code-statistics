@@ -2,7 +2,6 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::Parser;
 use num_cpus;
 use regex::Regex;
-use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,9 +32,12 @@ fn main() {
     let all_branch_commits = git_all_branch_commits(&dir.clone());
     let commit_tree = CommitTree::new(&all_branch_commits);
     let commit_vec = commit_tree.commit_vec_by_unix(commit_start_date_unix, commit_end_date_unix);
+
     let statistic = Arc::new(Mutex::new(Statistic::new()));
     let count = Arc::new(Mutex::new(0));
     let total = commit_vec.len();
+    // 根据当前机器的cpu核心数，对commit 列表进行分组
+    // 每个线程处理一组commit
     let num_cores = num_cpus::get();
     let num_cores = if num_cores > 1 { num_cores - 1 } else { 1 };
     let commit_vec_chunk = commit_vec.chunks(if total > 100 { total / num_cores } else { 100 });
@@ -188,7 +190,7 @@ fn git_branches(dir: &str) -> Vec<String> {
     branches
 }
 
-#[derive(Debug, Clone, Hash)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct Commit {
     author: String,
     unix_date: String,
@@ -196,17 +198,13 @@ struct Commit {
     email: String,
     msg: String,
     parent_commit_id: Option<String>,
+    parent_commits_id: Option<Vec<String>>,
 }
-
-impl PartialEq for Commit {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl Eq for Commit {}
 
 /// 根据分支名获取commit列表
+///
+/// - 会过滤掉合并分支的节点
+/// - 会过滤掉合并进分支的所有节点
 fn git_commits(dir: &str, branch: &str) -> Vec<Commit> {
     let mut git_command = std::process::Command::new("git");
     git_command.current_dir(dir);
@@ -214,7 +212,6 @@ fn git_commits(dir: &str, branch: &str) -> Vec<Commit> {
     let output = git_command
         .args(&[
             "log",
-            "--no-merges",
             "--pretty=format:%an;;;;%ae;;;;%H;;;;%at;;;;%s;;;;%P",
             branch,
         ])
@@ -230,19 +227,82 @@ fn git_commits(dir: &str, branch: &str) -> Vec<Commit> {
         let items: Vec<&str> = line.split(";;;;").collect();
         if items.len() == 6 {
             let commit_id = items[2].to_string();
+            let parent_commit_id = items.get(5).and_then(|x| {
+                let trim_x = x.trim();
+                if trim_x.is_empty() {
+                    None
+                } else {
+                    Some(trim_x.to_string())
+                }
+            });
+            let parent_commits_id = parent_commit_id.as_ref().and_then(|v| {
+                Some(
+                    v.split_whitespace()
+                        .map(|s| s.to_string())
+                        .collect::<Vec<String>>(),
+                )
+            });
             let commit = Commit {
                 author: items[0].to_string(),
                 unix_date: items[3].to_string(),
                 id: commit_id.clone(),
                 email: items[1].to_string(),
                 msg: items[4].to_string(),
-                parent_commit_id: items.get(5).and_then(|x| Some(x.to_string())),
+                parent_commits_id,
+                parent_commit_id,
             };
             commits.push(commit);
         }
     }
     commits.reverse();
 
+    // 移除所有merge过来的节点
+    //
+    // 通过检查上一个节点是的commit id 是否和 parent_commit_id 相同
+    let mut pre_option_commit_id: Option<String> = None;
+    let commits = commits
+        .iter()
+        .filter_map(|v| {
+            let mut commit = None;
+            let parent_commits_vec = &v.parent_commits_id;
+            let commit_id = v.id.clone().into();
+            // 第一个节点
+            if parent_commits_vec.is_none() {
+                commit = Some(v.clone());
+                pre_option_commit_id = commit_id;
+                return commit;
+            }
+
+            // 过滤 merge 节点
+            if let Some(_) =
+                parent_commits_vec
+                    .clone()
+                    .and_then(|v| if v.len() > 1 { Some(()) } else { None })
+            {
+                pre_option_commit_id = commit_id;
+                return commit;
+            }
+
+            // 检查上一个节点是的commit id 是否存在于 parent_commit_id 中
+            // 如果存在则保留当前节点 否则丢弃
+            // 如果存在则更新 pre_option_commit_id
+            if let Some(pre_commit_id_vec) = &pre_option_commit_id {
+                let contain = {
+                    let parent_commits_vec = parent_commits_vec.clone().unwrap();
+                    if parent_commits_vec.contains(pre_commit_id_vec) {
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if contain {
+                    pre_option_commit_id = commit_id;
+                    commit = Some(v.clone());
+                }
+            }
+            commit
+        })
+        .collect();
     commits
 }
 
@@ -282,10 +342,10 @@ impl<'a> CommitTreeNode<'a> {
         self.children.push(CommitTreeNode::new(commit));
     }
 
-    /// 深度优先遍历
+    /// 根据日期获取CommitTreeNode子树
     ///
-    /// 查找unix_date大于指定日期的子树列表
-    fn sub_tree_vec_by_unix_date(
+    /// 使用深度优先遍历方式
+    fn sub_tree_by_unix_date(
         &self,
         start_unix_date: u64,
         end_unix_date: u64,
@@ -296,12 +356,46 @@ impl<'a> CommitTreeNode<'a> {
             result.push(self);
         } else {
             for child in &self.children {
-                let mut child_result =
-                    child.sub_tree_vec_by_unix_date(start_unix_date, end_unix_date);
+                let mut child_result = child.sub_tree_by_unix_date(start_unix_date, end_unix_date);
                 result.append(&mut child_result);
             }
         }
         result
+    }
+
+    /// 将指定的tree_node合并到当前节点
+    ///
+    /// 并返回是否合并成功
+    ///
+    /// 合并规则:
+    ///
+    /// ```
+    ///     1   1        1
+    ///     |   |        |
+    ///     2   2        2
+    ///     | + |  =>    |
+    ///     3   3        3
+    ///     |   |       / \
+    ///     5   4      4   5
+    /// ```
+    ///                
+    fn merge<'b>(&mut self, tree_node: &'b mut CommitTreeNode<'a>) -> bool {
+        if self.commit != tree_node.commit {
+            return false;
+        }
+        let mut base_node = self;
+        let mut merged_in_node = tree_node;
+        while !merged_in_node.children.is_empty() {
+            merged_in_node = &mut merged_in_node.children[0];
+            let position = base_node.children.iter().position(|x| x == merged_in_node);
+            if position.is_none() {
+                base_node.children.push(merged_in_node.clone());
+                return true;
+            } else if let Some(positon) = position {
+                base_node = base_node.children.get_mut(positon).unwrap();
+            }
+        }
+        true
     }
 }
 
@@ -331,7 +425,19 @@ impl<'a> CommitTree<'a> {
         tree
     }
 
-    /// 将节点链表合并成一个链表
+    /// 合并所有的commit tree
+    ///
+    /// 合并规则:
+    ///
+    /// ```
+    ///     7   1   1      7   1
+    ///     |   |   |      |   |
+    ///     8   2   2      8   2
+    ///     | + | + |  =>  |   |
+    ///     9   3   3      9   3
+    ///         |   |         / \
+    ///         5   4        4   5
+    /// ```
     fn merge(&mut self) {
         let mut merge_in_vec = Vec::new();
         let mut merge_wait_vec = self.children.clone();
@@ -342,7 +448,7 @@ impl<'a> CommitTree<'a> {
             let mut merged = false;
             for j in 0..merge_in_vec.len() {
                 let merge_in_node = merge_in_vec.get_mut(j).unwrap();
-                merged = merge_in(merge_in_node, merge_wait_node);
+                merged = merge_in_node.merge(merge_wait_node);
                 if merged {
                     break;
                 }
@@ -354,7 +460,9 @@ impl<'a> CommitTree<'a> {
         self.children = merge_in_vec
     }
 
-    /// 根据日期获取commit列表
+    /// 根据日期获取CommitTreeNode子树列表
+    ///
+    ///  children 中可能存在多个 CommitTreeNode
     fn sub_tree_vec_by_unix_date(
         &self,
         start_unix_date: u64,
@@ -362,8 +470,7 @@ impl<'a> CommitTree<'a> {
     ) -> Vec<&CommitTreeNode<'a>> {
         let mut sub_tree_vec = vec![];
         for tree in self.children.iter() {
-            sub_tree_vec
-                .append(&mut tree.sub_tree_vec_by_unix_date(start_unix_date, end_unix_date));
+            sub_tree_vec.append(&mut tree.sub_tree_by_unix_date(start_unix_date, end_unix_date));
         }
         sub_tree_vec
     }
@@ -375,11 +482,6 @@ impl<'a> CommitTree<'a> {
         tree_vec.iter().for_each(|v| {
             commits.append(&mut flatten_commit_tree_node(v));
         });
-        let commits: Vec<_> = commits
-            .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
         commits
     }
 }
@@ -395,25 +497,7 @@ fn flatten_commit_tree_node<'a>(commit_tree: &'a CommitTreeNode<'a>) -> Vec<&Com
     commits
 }
 
-fn merge_in<'a, 'b>(base: &'a mut CommitTreeNode<'b>, commit: &'a mut CommitTreeNode<'b>) -> bool {
-    if base.commit != commit.commit {
-        return false;
-    }
-    let mut base_node = base;
-    let mut merged_in_node: &mut CommitTreeNode = commit;
-    while !merged_in_node.children.is_empty() {
-        merged_in_node = &mut merged_in_node.children[0];
-        let position = base_node.children.iter().position(|x| x == merged_in_node);
-        if position.is_none() {
-            base_node.children.push(merged_in_node.clone());
-            return true;
-        } else if let Some(positon) = position {
-            base_node = base_node.children.get_mut(positon).unwrap();
-        }
-    }
-    true
-}
-
+/// 将日期转换成unix时间戳
 fn unix_timestamp(time: &str) -> u64 {
     let date = NaiveDate::parse_from_str(time, "%Y-%m-%d").expect("parse date error");
     let date = NaiveDateTime::new(
