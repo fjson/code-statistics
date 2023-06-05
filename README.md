@@ -1,4 +1,4 @@
-## 版本管理工具
+## 代码统计工具
 
 ### 开发环境
 
@@ -23,6 +23,13 @@ cargo install cross --git https://github.com/cross-rs/cross
 
 ```bash
 cross build --target x86_64-unknown-linux-musl --release
+```
+
+
+#### 用例
+
+```bash
+code-statistics -i git项目路径 -s 开始时间 -e 结束时间 [--author 根据提交人显示]
 ```
 
 
