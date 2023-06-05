@@ -10,19 +10,19 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(author = "jason xing", version, about, long_about = None)]
 pub struct StatisticArgs {
-    /// 开始日期
+    /// start date
     #[arg(long, short)]
     start: String,
 
-    /// 结束日期
+    /// end date
     #[arg(long, short)]
     end: String,
 
-    /// git 项目地址
+    /// git repository path
     #[arg(long, short)]
     input: String,
 
-    /// 是否根据提交者显示统计结果
+    /// print with author
     #[arg(long, short, default_value_t = false)]
     author: bool,
 }
@@ -39,7 +39,6 @@ fn main() {
     let all_branch_commits = git_all_branch_commits(&dir.clone());
     let commit_tree = CommitTree::new(&all_branch_commits);
     let commit_vec = commit_tree.commit_vec_by_unix(commit_start_date_unix, commit_end_date_unix);
-
     let statistic = Arc::new(Mutex::new(Statistic::new()));
     let count = Arc::new(Mutex::new(0));
     let total = commit_vec.len();
@@ -75,6 +74,11 @@ fn main() {
     println!("exec time: {:?}ms", duration.as_millis());
 }
 
+/// 统计结构体
+///
+/// 支持添加 StatisticItem
+///
+/// 输出最终的统计结果
 #[derive(Debug, Clone)]
 struct Statistic {
     statistic_item_vec: Vec<StatisticItem>,
@@ -136,15 +140,24 @@ impl Statistic {
     }
 }
 
+/// 单个 Commit 统计信息
 #[derive(Debug, Clone)]
 struct StatisticItem {
+    /// 提交信息
     commit: Commit,
+    /// 文件数
     files: usize,
+    /// 插入行数
     insertion: usize,
+    /// 删除行数
     deletion: usize,
 }
 
-/// 使用git diff 命令 对比两个commit之间的代码行数
+/// 使用git diff 命令 对比两个commit之间的代码差异
+///
+/// empty tree sha1 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+///
+/// 或者可以通过命令 git hash-object -t tree /dev/null 获取
 fn get_commit_diff_by_git(dir: &str, commit: Commit) -> StatisticItem {
     let mut git_command = std::process::Command::new("git");
     git_command.current_dir(dir);
@@ -152,7 +165,10 @@ fn get_commit_diff_by_git(dir: &str, commit: Commit) -> StatisticItem {
         .args(&[
             "diff",
             "--shortstat",
-            commit.parent_commit_id.as_ref().unwrap_or(&"4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()),
+            commit
+                .parent_commit_id
+                .as_ref()
+                .unwrap_or(&"4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()),
             &commit.id,
         ])
         .output()
@@ -219,6 +235,7 @@ fn git_branches(dir: &str) -> Vec<String> {
     branches
 }
 
+/// Commit 信息
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct Commit {
     author: String,
@@ -227,6 +244,9 @@ struct Commit {
     email: String,
     msg: String,
     parent_commit_id: Option<String>,
+    /// merge 节点会存在多个parent commit
+    ///
+    /// merge 节点不会被统计
     parent_commits_id: Option<Vec<String>>,
 }
 
@@ -345,6 +365,9 @@ fn git_all_branch_commits(dir: &str) -> Vec<Vec<Commit>> {
     commits
 }
 
+/// commit tree node
+///
+/// 用于构建commit tree
 #[derive(Debug, Clone)]
 struct CommitTreeNode<'a> {
     commit: &'a Commit,
@@ -428,6 +451,11 @@ impl<'a> CommitTreeNode<'a> {
     }
 }
 
+/// commit tree
+///
+/// 用于合并多个commit tree node
+///
+/// 可以根据日期获取commit列表
 #[derive(Debug)]
 struct CommitTree<'a> {
     children: Vec<CommitTreeNode<'a>>,
