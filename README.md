@@ -2,7 +2,7 @@
 
 ### 开发环境
 
-- rustc: 1.69.0
+- rustc: 1.71.0
 - system: windows,linux,mac
 - runtime: windows,linux,mac
 
