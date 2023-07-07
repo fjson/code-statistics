@@ -3,7 +3,7 @@ use clap::Parser;
 use num_cpus;
 use regex::Regex;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex};
 use std::thread;
 use std::time::Instant;
 
@@ -30,7 +30,7 @@ pub struct StatisticArgs {
 fn main() {
     let start = Instant::now();
     let args = StatisticArgs::parse();
-    let dir = Arc::new(args.input.clone());
+    let dir = args.input.clone();
     let commit_start_date_unix = unix_timestamp(&args.start);
     let commit_end_date_unix = unix_timestamp(&args.end);
     if commit_end_date_unix < commit_start_date_unix {
@@ -39,36 +39,31 @@ fn main() {
     let all_branch_commits = git_all_branch_commits(&dir.clone());
     let commit_tree = CommitTree::new(&all_branch_commits);
     let commit_vec = commit_tree.commit_vec_by_unix(commit_start_date_unix, commit_end_date_unix);
-    let statistic = Arc::new(Mutex::new(Statistic::new()));
-    let count = Arc::new(Mutex::new(0));
+    let statistic = Mutex::new(Statistic::new());
+    let count = Mutex::new(0);
     let total = commit_vec.len();
     // 根据当前机器的cpu核心数，对commit 列表进行分组
     // 每个线程处理一组commit
-    let num_cores = num_cpus::get();
-    let num_cores = if num_cores > 1 { num_cores - 1 } else { 1 };
-    let commit_vec_chunk = commit_vec.chunks(if total > 100 { total / num_cores } else { 100 });
-    let mut thread_vec = vec![];
-    commit_vec_chunk.for_each(|chunk| {
-        let chunk: Vec<Commit> = chunk.to_owned().into_iter().map(|v| v.clone()).collect();
-        let statistic = Arc::clone(&statistic);
-        let count = Arc::clone(&count);
-        let dir_arc = dir.clone();
-        let handle = thread::spawn(move || {
-            chunk.into_iter().for_each(|v| {
-                {
-                    let mut num = count.lock().unwrap();
-                    *num += 1;
-                    // println!("process {}/{}", num, total);
-                }
-                let diff_res = get_commit_diff_by_git(&dir_arc, v);
-                statistic.lock().unwrap().add(diff_res);
+    let commit_vec_chunk = {
+        let num_cores = num_cpus::get();
+        let num_cores = if num_cores > 1 { num_cores - 1 } else { 1 };
+        commit_vec.chunks(if total > 100 { total / num_cores } else { 100 })
+    };
+    thread::scope(|s| {
+        commit_vec_chunk.for_each(|chunk| {
+            s.spawn(|| {
+                chunk.into_iter().for_each(|v| {
+                    {
+                        let mut num = count.lock().unwrap();
+                        *num += 1;
+                        // println!("process {}/{}", num, total);
+                    }
+                    let diff_res = get_commit_diff_by_git(&dir, v.to_owned().to_owned());
+                    statistic.lock().unwrap().add(diff_res);
+                });
             });
         });
-        thread_vec.push(handle);
     });
-    for handle in thread_vec {
-        handle.join().unwrap();
-    }
     statistic.lock().unwrap().print(args.author);
     let duration = start.elapsed();
     println!("exec time: {:?}ms", duration.as_millis());
