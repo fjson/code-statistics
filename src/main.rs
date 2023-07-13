@@ -3,7 +3,8 @@ use clap::Parser;
 use num_cpus;
 use regex::Regex;
 use std::hash::Hash;
-use std::sync::{Mutex};
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
 
@@ -40,7 +41,7 @@ fn main() {
     let commit_tree = CommitTree::new(&all_branch_commits);
     let commit_vec = commit_tree.commit_vec_by_unix(commit_start_date_unix, commit_end_date_unix);
     let statistic = Mutex::new(Statistic::new());
-    let count = Mutex::new(0);
+    let count = AtomicI32::new(0);
     let total = commit_vec.len();
     // 根据当前机器的cpu核心数，对commit 列表进行分组
     // 每个线程处理一组commit
@@ -53,11 +54,8 @@ fn main() {
         commit_vec_chunk.for_each(|chunk| {
             s.spawn(|| {
                 chunk.into_iter().for_each(|v| {
-                    {
-                        let mut num = count.lock().unwrap();
-                        *num += 1;
-                        // println!("process {}/{}", num, total);
-                    }
+                    count.fetch_add(1, Ordering::Relaxed);
+                    println!("process {:?}/{}", count, total);
                     let diff_res = get_commit_diff_by_git(&dir, v.to_owned().to_owned());
                     statistic.lock().unwrap().add(diff_res);
                 });
