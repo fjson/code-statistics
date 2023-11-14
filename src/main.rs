@@ -55,7 +55,6 @@ fn main() {
             s.spawn(|| {
                 chunk.into_iter().for_each(|v| {
                     count.fetch_add(1, Ordering::Relaxed);
-                    println!("process {:?}/{}", count, total);
                     let diff_res = get_commit_diff_by_git(&dir, v.to_owned().to_owned());
                     statistic.lock().unwrap().add(diff_res);
                 });
