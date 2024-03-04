@@ -1,6 +1,5 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use clap::Parser;
-use num_cpus;
 use regex::Regex;
 use std::hash::Hash;
 use std::sync::atomic::{AtomicI32, Ordering};
